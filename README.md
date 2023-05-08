@@ -1,283 +1,188 @@
-# MinImagen
-### A Minimal implementation of the [Imagen](https://imagen.research.google/) text-to-image model.
+# Project Report: Test 2 Image Generating Task 🎨🖼️
 
-<br/>
+Author: Zhiyi Shi ([zhiyis](zhiyis@andrew.cmu.edu)), Linji Wang ([linjiw](linjiw@andrew.cmu.edu))
 
-<p align="center"><img src="./images/model_structure.png?raw=True" width="700"/></p>
+## Start with GigaGAN
 
-<br/>
+<!-- # Introduction -->
 
-### See [Build Your Own Imagen Text-to-Image Model](https://www.assemblyai.com/blog/build-your-own-imagen-text-to-image-model/) for a tutorial on how to build MinImagen.
+Once upon a time, in our class, we were introduced to **GigaGAN**[^1] - a remarkable idea that instantly caught our attention. As we delved deeper into the topic, we were astounded by the intricate handling of the filter bank that was mentioned. Our curiosity was piqued, and we found ourselves deeply interested in the concept. Moreover, we were already drawn to the idea of text-to-image conversion and its potential applications. We felt compelled to explore the intricacies of Giga GAN further and decided to undertake a project to reproduce the code and learn more about its text-to-image processing techniques.
 
-### See [How Imagen Actually Works](https://www.assemblyai.com/blog/how-imagen-actually-works/) for a detailed explanation of Imagen's operating principles.
+![GigaGAN](data/GigaGAN%20model.png "GigaGAN")
 
-<br/>
+### Challenges in GigaGAN
 
-Given a caption of an image, the text-to-image model **Imagen** will generate an image that reflects the scene described by the caption. The model is a [cascading diffusion model](https://arxiv.org/abs/2106.15282), using a [T5 text encoder](https://arxiv.org/abs/1910.10683) to generate a caption encoding which conditions a base image generator and then a sequence of super-resolution models through which the output of the base image generator is passed.
+However, after reading the entire paper, we realized the serious shortage of computing resources. (The smallest version of Giga GAN in the paper is trained on 64 A-100 GPU.) So, we plan to only create a "toy" version of Giga GAN to showcase its implementation ideas. After referring to the GitHub code to implement the forward part of the model, we decided to select some parts from the full model in the original paper for experimentation. In the end, we chose clip loss, matching aware loss, multi-scale loss, and filter bank.
 
-In particular, two notable contributions are the developments of:
-1. [**Noise Conditioning Augmentation**](https://www.assemblyai.com/blog/how-imagen-actually-works/#robust-cascaded-diffusion-models), which noises low-resolution conditioning images in the super-resolution models, and
-2. [**Dynamic Thresholding**](https://www.assemblyai.com/blog/how-imagen-actually-works/#dynamic-thresholding) which helps prevent image saturation at high [classifier-free guidance](https://www.assemblyai.com/blog/how-imagen-actually-works/#classifier-free-guidance) weights.
+![GigaGAN model Size](./data/gigagan%20model%20size.png "GigaGAN Model Size")
 
-<br/>
 
-**N.B. - This project is intended only for educational purposes to demonstrate how Diffusion Models are implemented and incorporated into text-to-image models. Many components of the network that are not essential for these educational purposes have been stripped off for simplicity. For a full-fledged implementation, check out Phil Wang's repo (see attribution note below)**
+We have written the code for these parts based on the paper. However, even if we use a very small batch size (which is 2), the model could only be trained on our GPU when incorporating the matching aware loss and clip loss. When multi-scale loss or filter bank is added, the GPU's memory is insufficient.
 
-<br/>
+The dataset we use is a Pokemon dataset with text and images paired. This text will provide a simple description of the image, with key information including color, species, and action.
 
-## Table of Contents
-- [Attribution Note](#attribution-note)
-- [Installation](#installation)
-- [Documentation](#documentation)
-- [Usage - Command Line](#usage---command-line)
-    - [`main.py`](#mainpy) - training and image generation in sequence
-    - [`train.py`](#trainpy) - training a MinImagen instance
-    - [`inference.py`](#inferencepy) - generated images using a MinImagen instance
-- [Usage - Package](#usage---package)
-    - [Training](#training)
-    - [Image Generation](#image-generation)
-- [Modifying the Source Code](#modifying-the-source-code)
-- [Additional Resources](#additional-resources)
-- [Socials](#socials)
+![Pokemon Dataset](./data/pokemon_dataset_small.png "Pokemon Dataset")
 
-<br/>
+### Results in GigaGAN
+In the beginning, we only added the most basic GAN loss without any condition to test the ability to generate clear images: that is, the model only pays attention to the authenticity of the generated images.  
 
-## Attribution Note
-This implementation is largely based on Phil Wang's [Imagen implementation](https://github.com/lucidrains/imagen-pytorch).
+![Pokemon Unconditional](./data/pokemon%20unconditional.png "Pokemon Unconditional")
 
-<br/>
+It can be seen that the generated image still has a rough outline, although the details are not satisfactory. Also, it can be seen that the colors, contours, and patterns all have certain rules, and the generated images have diversity.
 
-## Installation
-To install MinImagen, run the following command in the terminal:
-```bash
-$ pip install minimagen
-```
-**Note that MinImagen requires Python3.9 or higher**
+Then we tried to add a naïve text condition to observe the results:
 
-<br/>
+![drawing of a brown and black Pokemon](./data/drawing%20of%20a%20brown%20and%20black%20Pokemon.png "drawing of a brown and black Pokemon")  **drawing of a brown and black Pokemon**
 
-## Documentation
-See the [MinImagen Documentation](https://assemblyai-examples.github.io/MinImagen/) to learn more about the package.
+It can be seen that the image quality has significantly decreased compared to not incorporating text conditions. It can be seen that the generated image roughly matches the content described in the text, but its shape is relatively strange. It means that the addition of text conditions significantly makes training more difficult to converge.
 
-<br/>
+Then we added matching loss for training and observed the results. It can be seen that the colors described in the generated image and text can match, but the shape is relatively irregular, indicating that the training did not converge well.
 
-## Usage - Command Line
-If you have cloned this repo (as opposed to just installing the `minimagen` package), you can use the provided scripts to get started with MinImagen. This repo can be cloned by running the following command in the terminal:
+![drawing of a brown and black Pokemon 2](./data/drawing%20of%20a%20brown%20and%20black%20Pokemon%202.png "drawing of a brown and black Pokemon")  **drawing of a brown and black Pokemon with matching loss**
 
-```bash
-$ git clone https://github.com/AssemblyAI-Examples/MinImagen.git
-```
 
-<br/>
+Then we added clip loss for training and observed the results. The generated images have no meaning, this is a completely non-convergent model. This indicates that our designed clip loss makes training extremely difficult to converge.
 
-### `main.py`
-For the most basic usage, simply enter the MinImagen directory and run the following in the terminal:
-```bash
-$ python main.py
-```
-This will create a small MinImagen instance and train it on a tiny amount of data, and then use this MinImagen instance to generate an image.
+![drawing of a brown and black Pokemon 3](data/drawing%20of%20a%20brown%20and%20black%20Pokemon%20clip.png "drawing of a brown and black Pokemon with clip") **drawing of a brown and black Pokemon with clip loss**
 
-<a id="training-directory">After<a/> running the script, you will see a directory called `training_<TIMESTAMP>`. 
-1. This directory is called a *Training Directory* and is generated when training a MinImagen instance. 
-2. It contains information about the configuration (`parameters` subdirectory), and contains the model checkpoints (`state_dicts` and `tmp` directories). 
-3. It also contains a `training_progress.txt` file that records training progress.
+Besides the visual differences, the quantitative results also show that the clip loss did not work in our case, and even produce worse results.
 
-You will also see a directory called `generated_images_<TIMESTEP>`.
-1. This directory contains a folder of images generated by the model (`generated_images`).
-2. It also contains `captions.txt` files, which documents the captions that were input to get the images (where the line index of a given caption corresponds to the image number in the `generated_iamges` folder).
-3. Finally, this directory also contains `imagen_training_directory.txt`, which specifies the name of the Training Directory used to load the MinImagen instance / generate images. 
+![LPIPS Results](./data/LPIPS.png "LPIPS")
 
-<br/>
-    
-### `train.py`
+This experiment is done using [**Learned Perceptual Image Patch Similarity (LPIPS)**](https://github.com/richzhang/PerceptualSimilarity) for evaluate the simiarity in feature space.
 
-`main.py` simply runs `train.py` and `inference.py` in series, the former to train the model and the latter to generate the image.
+### Conclusions in GigaGAN:
 
-To train a model, simply run `train.py` and specify relevant command line arguments. The [possible arguments](https://github.com/AssemblyAI-Examples/MinImagen/blob/d7de8350db17713fb630e127c010020820953872/minimagen/training.py#L178) are:
+1.	The effect of the image we generated is not good, which may be related to the selection of a hyperparameter and the size of the data. Firstly, choosing a smaller batch size can result in poor convergence of the entire training. Secondly, there are too many hyperparameters in this model, and we can only use a few tuning parameters due to our computing resources.
+2.	GANs, in general, require a substantial amount of computing resources for training and might be unstable when training on small datasets or with insufficient computational resources.
 
-- `--PARAMETERS` or `-p`, which specifies a directory that specifies the MinImagen configuration to use. It should be structured like a `parameters` subdirectory within a Training Directory (example in [`parameters`](https://github.com/AssemblyAI-Examples/MinImagen/tree/main/parameters)).
-- `--NUM_WORKERS"` or `-n`, which specifies the number of workers to use for the DataLoaders.
-- `--BATCH_SIZE` or `-b`, which specifies the batch size to use during training.
-- `--MAX_NUM_WORDS` or `-mw`, which specifies the maximum number of words allowed in a caption.
-- `--IMG_SIDE_LEN` or `-s`, specifies the final side length of the square images the MinImagen will output.
-- `--EPOCHS` or `-e`, which specifies the number of training epochs.
-- `--T5_NAME` `-t5`, which specifies the name of T5 encoder to use.
-- `--TRAIN_VALID_FRAC` or `-f`, which specifies the fraction of dataset to use for training (vs. validation).
-- `--TIMESTEPS` or `-t`, which specifies the number of timesteps in Diffusion Process.
-- `--OPTIM_LR` or `-lr`, which specifies the learning rate for Adam optimizer.
-- `--ACCUM_ITER` or `-ai`, which specifies the number of batches to accumulate for gradient accumulation.
-- `--CHCKPT_NUM` or `-cn`, which specifies the interval of batches to create a temporary model checkpoint at during training.
-- `--VALID_NUM` or `-vn`, which specifies the number of validation images to use. If None, uses full amount from train/valid split. The reason for including this is that, even with an e.g. 0.99 `--TRAIN_VALID_FRAC`, a prohibitively large number of images could still be left for validation for very large datasets.
-- `--RESTART_DIRECTORY` or `-rd`, training directory to load MinImagen instance from if resuming training. A new Training Directory will be created for the training, leaving the previous Training Directory from which the checkpoint is loaded unperturbed.
-- `--TESTING` or `-test`, which is used to run the script with a small MinImagen instance and small dataset for testing.
+### Continue Explore Text 2 Image
+Although the implementation effect of Giga GAN is not satisfactory, we are still quite interested in handling clip loss. Thus, we searched for relevant papers and open-source resources and decided to convert text to images again on the diffusion model, and compared its effectiveness with GAN.
 
-For example, to run a small training using the provided example [`parameters`](https://github.com/AssemblyAI-Examples/MinImagen/tree/main/parameters) folder, run the following in the terminal:
 
-```bash
-python train.py --PARAMETERS ./parameters --BATCH_SIZE 2 --TIMESTEPS 25 --TESTING
-```
-After execution, you will see a new `training_<TIMESTAMP>` [Training Directory](#training-directory) that contains the files as [listed above](#training-directory) from the training.
-    
-<br/>
-    
-### `inference.py`
-    
-To generate images using a model from a [Training Directory](#training-directory), we can use `inference.py`. Simply run `inference.py` and specify relevant command line arguments. The possible arguments are:
-    
-- `--TRAINING_DIRECTORY"` or `-d`, which specifies the training directory from which to load the MinImagen instance for inference.
-- `--CAPTIONS` or `-c`, which specifies either (a) a single caption to generate an image for, or (b) a filepath to a `.txt` file that contains a list of captions to generate images for, where each caption is on a new line.
-    
-For example, to generate images for the example captions provided in [`captions.txt`](https://github.com/AssemblyAI-Examples/MinImagen/blob/main/captions.txt) using the model generated from the above training line, simply run
-    
-```bash
-python inference.py -CAPTIONS captions.txt --TRAINING_DIRECTORY training_<TIMESTAMP>    
-```
 
-where `TIMESTAMP` is replaced with the appropriate value from your training.
-    
-<br/>
 
-## Usage - Package
 
-### Training
-    
-A minimal training script using the `minimagen` package is shown below. See [`train.py`](https://github.com/AssemblyAI-Examples/MinImagen/blob/main/train.py) for a more built-up version of the below code.
-    
-```python
-import os
-from datetime import datetime
 
-import torch.utils.data
-from torch import optim
 
-from minimagen.Imagen import Imagen
-from minimagen.Unet import Unet, Base, Super, BaseTest, SuperTest
-from minimagen.generate import load_minimagen, load_params
-from minimagen.t5 import get_encoded_dim
-from minimagen.training import get_minimagen_parser, ConceptualCaptions, get_minimagen_dl_opts, \
-    create_directory, get_model_size, save_training_info, get_default_args, MinimagenTrain, \
-    load_testing_parameters
+## Switch to Imagen
 
-# Get device
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+In this project, we first attempted to reproduce and explore the GigaGAN model, uncovering its remarkable text-to-image processing techniques. Subsequently, we shifted our focus to the **MinImagen**[^2] architecture, an efficient text-to-image generation model capable of producing high-quality images. Our goal is to experiment with these two models, comparing their strengths and weaknesses, and ultimately share our findings and experiences in the world of image generation.
 
-# Command line argument parser
-parser = get_minimagen_parser()
-args = parser.parse_args()
+![Imagen Architechture](./data/Imagen_model_structure.png "Imagen Model")
 
-# Create training directory
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-dir_path = f"./training_{timestamp}"
-training_dir = create_directory(dir_path)
 
-# Replace some cmd line args to lower computational load.
-args = load_testing_parameters(args)
+<!-- In this project, we aim to implement an **Image Generation** model based on the [**MinImagen**][1](https://github.com/AssemblyAI-Examples/MinImagen) architecture. MinImagen is a text-to-image generation model that is efficient and generates high-quality images from textual descriptions. Our goal is to experiment with this model and share our findings and experiences. -->
 
-# Load subset of Conceptual Captions dataset.
-train_dataset, valid_dataset = ConceptualCaptions(args, smalldata=True)
+### Implementation
 
-# Create dataloaders
-dl_opts = {**get_minimagen_dl_opts(device), 'batch_size': args.BATCH_SIZE, 'num_workers': args.NUM_WORKERS}
-train_dataloader = torch.utils.data.DataLoader(train_dataset, **dl_opts)
-valid_dataloader = torch.utils.data.DataLoader(valid_dataset, **dl_opts)
+We began by implementing the **MinImagen** model using the resources provided by **AssemblyAI** [^3]. The key component of this implementation is the **Diffusion** part, which has the following characteristics compared with the **GigaGAN** in our training environment.:
 
-# Use small U-Nets to lower computational load.
-unets_params = [get_default_args(BaseTest), get_default_args(SuperTest)]
-unets = [Unet(**unet_params).to(device) for unet_params in unets_params]
+- Training is fast ⚡
+- Sample image generation is slow 🐢
+- Convergence is fast 🏃
+- Generated results are more meaningful 🎯
 
-# Specify MinImagen parameters
-imagen_params = dict(
-    image_sizes=(int(args.IMG_SIDE_LEN / 2), args.IMG_SIDE_LEN),
-    timesteps=args.TIMESTEPS,
-    cond_drop_prob=0.15,
-    text_encoder_name=args.T5_NAME
-)
+<!-- Another important feature of our implementation is the **classifier-free guidance** for text conditioning. This means that we don't need to rely on a separate classifier to guide the image generation process. -->
 
-# Create MinImagen from UNets with specified imagen parameters
-imagen = Imagen(unets=unets, **imagen_params).to(device)
+<!-- ### Dataset
 
-# Fill in unspecified arguments with defaults to record complete config (parameters) file
-unets_params = [{**get_default_args(Unet), **i} for i in unets_params]
-imagen_params = {**get_default_args(Imagen), **imagen_params}
+We used the [**HuggingFace lambdalabs/pokemon-blip-captions dataset**](https://huggingface.co/datasets/lambdalabs/pokemon-blip-captions)🐾 as the basis for our image generation task. We edited the dataloader and dataset functions to make them compatible with our implementation.
 
-# Get the size of the Imagen model in megabytes
-model_size_MB = get_model_size(imagen)
+![Pokemon Dataset](data/pokemon_data_set.png "Pokemon Dataset") -->
 
-# Save all training info (config files, model size, etc.)
-save_training_info(args, timestamp, unets_params, imagen_params, model_size_MB, training_dir)
+### Experimentation
 
-# Create optimizer
-optimizer = optim.Adam(imagen.parameters(), lr=args.OPTIM_LR)
+During the experimentation phase, we encountered some challenges:
 
-# Train the MinImagen instance
-MinimagenTrain(timestamp, args, unets, imagen, train_dataloader, valid_dataloader, training_dir, optimizer, timeout=30)
+1. **Model Size**: The original model with super resolution was too large to fit into a 12GB GPU for training, even with a batch size of 1.
+2. **Logging**: We used **Weights & Biases (wandb)** for logging our training process.
+
+![Imagen Training](data/Imagen_training.png "Validation Loss")
+
+3. **Remove Super Resolution**: Due to the model's large size, we had to remove the super resolution layer for training.
+
+```json
+// Training parameters
+{
+    "text_embed_dim": null,
+    "channels": 3,
+    "timesteps": 1000,
+    "cond_drop_prob": 0.15,
+    "loss_type": "l2",
+    "lowres_sample_noise_level": 0.2,
+    "auto_normalize_img": true,
+    "dynamic_thresholding_percentile": 0.9,
+    "only_train_unet_number": null,
+    "image_sizes": [
+        64
+    ],
+    "text_encoder_name": "t5_small"
+}
+// Model Size
+{
+    "dim": 128,
+    "dim_mults": [
+        1,
+        2,
+        4
+    ],
+    "channels": 3,
+    "channels_out": null,
+    "cond_dim": null,
+    "text_embed_dim": 512,
+    "num_resnet_blocks": 1,
+    "layer_attns": [
+        false,
+        true,
+        true
+    ],
+    "layer_cross_attns": [
+        false,
+        true,
+        true
+    ],
+    "attn_heads": 8,
+    "lowres_cond": false,
+    "memory_efficient": false,
+    "attend_at_middle": false
+}
 ```
 
-### Image Generation
-    
-A minimal inference script using the `minimagen` package is shown below. See [`inference.py`](https://github.com/AssemblyAI-Examples/MinImagen/blob/main/inference.py) for a more built-up version of the below code.
+Despite these challenges, our model was able to converge quickly, taking only 300 epochs with a batch size of 2 and a time step of 1000 to generate meaningful images. 🌟
 
-```python
-from argparse import ArgumentParser
-from minimagen.generate import load_minimagen, sample_and_save
+| Training Step | Image |
+|:-------------:|:-----:|
+| a blue and red pokemon 500        | ![Step 500 Image](./data/imagen_500.png) |
+| a blue and red pokemon 600        | ![Step 600 Image](./data/imagen_600.png) |
+| a blue and red pokemon 700        | ![Step 700 Image](./data/imagen_700.png) |
+| a blue and red pokemon 800        | ![Step 800 Image](./data/imagen_800.png) |
 
-# Command line argument parser
-parser = ArgumentParser()
-parser.add_argument("-d", "--TRAINING_DIRECTORY", dest="TRAINING_DIRECTORY", help="Training directory to use for inference", type=str)
-args = parser.parse_args()
-
-# Specify the caption(s) to generate images for
-captions = ['a happy dog']
-
-# Use `sample_and_save` to generate and save the iamges
-sample_and_save(captions, training_directory=args.TRAINING_DIRECTORY)
+We think the quality of Imagen generated image is better than our previous results from GigaGAN, even in a very early training stage. One could think these images look more complete than the previous results, thus some extent more like a Pokemon.
 
 
+| Text Prompt (text scale) | Image |
+|:-------------:|:-----:|
+| a drawing of a green pokemon with red eyes (0.1)        | ![text scale = 0.1](./data/text_scale_0.1.png) |
+| a drawing of a green pokemon with red eyes (3.0)       | ![text scale = 3.0](./data/text_scale_3.0.png) |
+| a drawing of a green pokemon with red eyes (5.0)       | ![text scale = 5.0](./data/text_scale_5.0.png) |
 
-# Alternatively, rather than specifying a Training Directory, you can input just a MinImagen instance to use for image generation.
-# In this case, information about the MinImagen instance used to generate the images will not be saved.
-minimagen = load_minimagen(args.TRAINING_DIRECTORY)
-sample_and_save(captions, minimagen=minimagen)    
-```
-    
-To see more of what MinImagen has to offer, or to get additional details on the scripts above, check out the [MinImagen Documentation](https://assemblyai-examples.github.io/MinImagen/)
+We could notice that with add more strength to the text scale, it starts to align with the text in some extent. Like when it is 0.1, it is just green. When add to 3.0, it shows a yellow color, which might be some blending information from "blue" and "red". When add to 5.0, it shows a blend with yellow and green, thus we assume it catchs more information from the content step by step.
 
-<br/>
-
-## Modifying the Source Code
-If you want to make modifications to the source code (rather than use the `minimagen` package), first clone this repository and navigate into it:
-
-```bash
-$ git clone https://github.com/AssemblyAI-Examples/MinImagen.git
-$ cd MinImagen
-```
-
-After that, create a virtual environment:
-```bash
-$ pip install virtualenv
-$ virtualenv venv
-```
-
-Then activate the virtual environment and install all dependencies:
-```bash
-$ .\venv\Scripts\activate.bat  # Windows
-$ source venv/bin/activate  # MacOS/Linux
-$ pip install -r requirements.txt
-```
-
-Now you can modify the source code and the changes will be reflected when running any of the [included scripts](#usage---command-line) (as long as the virtual environment created above is active).
+When text scale = 5.0, we could notice that the image quality is not good and has a lot of noise on the white background. This is due to the text scale is too high that we force the network to focus more on the text information, but not the quality side.
 
 
-<br/>
+<!-- <span style="color:blue">some *blue* text</span>. -->
 
-## Additional Resources
+### Future Work 💡
 
-- For a step-by-step guide on how to build the version of Imagen in this repository, see [Build Your Own Imagen Text-to-Image Model](https://www.assemblyai.com/blog/build-your-own-imagen-text-to-image-model/).
-- For an deep-dive into how Imagen works, see [How Imagen Actually Works](https://www.assemblyai.com/blog/how-imagen-actually-works/).
-- For a deep-dive into Diffusion Models, see our [Introduction to Diffusion Models for Machine Learning](https://www.assemblyai.com/blog/diffusion-models-for-machine-learning-introduction/) guide.
-- For additional learning resources on Machine Learning and Deep Learning, check out our [Blog](https://www.assemblyai.com/blog/) and [YouTube channel](https://www.youtube.com/c/AssemblyAI).
-- Read the original Imagen paper [here](https://arxiv.org/abs/2205.11487).
-    
-## Socials
-- Follow us on [Twitter](https://twitter.com/AssemblyAI) for more Deep Learning content.
-- [Follow our newsletter](https://assemblyai.us17.list-manage.com/subscribe?u=cb9db7b18b274c2d402a56c5f&id=2116bf7c68) to stay up to date on our recent content.
+We plan to add a **super resolution layer** in the future to further improve our image generation capabilities.
+
+### Conclusion
+
+Our project on implementing and experimenting with the MinImagen architecture for text-to-image generation has been successful. We were able to generate meaningful images from textual descriptions, overcoming challenges related to model size and training resources. We hope that our experience and findings can help others working on similar projects. 😃
+
+
+[^1]: GigaGAN (https://mingukkang.github.io/GigaGAN/)
+[^2]: MinImagen: Build Your Own Imagen Text-to-Image Model (https://www.assemblyai.com/blog/minimagen-build-your-own-imagen-text-to-image-model/)
+[^3]: AssemblyAI-Examples/MinImagen GitHub Repository (https://github.com/AssemblyAI-Examples/MinImagen?ref=assemblyai.com)

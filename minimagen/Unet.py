@@ -652,7 +652,7 @@ class Base(Unet):
     """
 
     defaults = dict(
-        dim=512,
+        dim=256,
         dim_mults=(1, 2, 3, 4),
         num_resnet_blocks=3,
         layer_attns=(False, True, True, True),
@@ -710,11 +710,11 @@ class BaseTest(Unet):
     """
 
     defaults = dict(
-        dim=8,
-        dim_mults=(1, 2),
+        dim=128,
+        dim_mults=(1, 2, 4),
         num_resnet_blocks=1,
-        layer_attns=False,
-        layer_cross_attns=False,
+        layer_attns=(False, True, True),
+        layer_cross_attns=(False, True, True),
         memory_efficient=False
     )
 
@@ -739,11 +739,11 @@ class SuperTest(Unet):
     - memory_efficient = True
     """
     defaults = dict(
-        dim=8,
-        dim_mults=(1, 2),
-        num_resnet_blocks=(1, 2),
-        layer_attns=False,
-        layer_cross_attns=False,
+        dim=128,
+        dim_mults=(1, 2, 4),
+        num_resnet_blocks=(2, 4, 8),
+        layer_attns=(False, False, True),
+        layer_cross_attns=(False, False, True),
         memory_efficient=True
     )
     def __init__(self, *args, **kwargs):

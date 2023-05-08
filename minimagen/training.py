@@ -8,7 +8,12 @@ from contextlib import contextmanager
 from functools import partial
 import io
 import urllib
+from sklearn.model_selection import train_test_split
+from torchvision import transforms
+import wandb
 from typing import Literal
+from torch.cuda.amp import autocast, GradScaler
+from minimagen.generate import load_minimagen, sample_and_save
 
 from tqdm import tqdm
 
@@ -17,9 +22,11 @@ import PIL.Image
 from einops import rearrange
 import torch.utils.data
 import torch.nn.functional as F
-from torchvision.transforms import Compose, ToTensor
+from torchvision.transforms import Compose, ToTensor, Resize
 
-from datasets import load_dataset
+# from datasets import load_dataset
+from datasets import load_dataset, DatasetDict
+
 from datasets.utils.file_utils import get_datasets_user_agent
 from resize_right import resize
 
@@ -29,7 +36,12 @@ from minimagen.t5 import t5_encode_text
 
 USER_AGENT = get_datasets_user_agent()
 
-
+def wandb_save(tensor, logname, iter_num):
+    # image = tensor.cpu().clone()  # we clone the tensor to not do changes on it
+    # image = image.squeeze(0)      # remove the fake batch dimension
+    # image = unloader(image)
+    images = wandb.Image(tensor, caption=f'{iter_num}.png')       
+    wandb.log({f'{logname}': images})
 class _Rescale:
     """
     Transformation to scale images to the proper size
@@ -184,7 +196,7 @@ def get_minimagen_parser():
                         type=int)
     parser.add_argument("-b", "--BATCH_SIZE", dest="BATCH_SIZE", help="Batch size", default=2, type=int)
     parser.add_argument("-mw", "--MAX_NUM_WORDS", dest="MAX_NUM_WORDS",
-                        help="Maximum number of words allowed in a caption", default=64, type=int)
+                        help="Maximum number of words allowed in a caption", default=16, type=int)
     parser.add_argument("-s", "--IMG_SIDE_LEN", dest="IMG_SIDE_LEN", help="Side length of square Imagen output images",
                         default=128, type=int)
     parser.add_argument("-e", "--EPOCHS", dest="EPOCHS", help="Number of training epochs", default=5, type=int)
@@ -210,6 +222,60 @@ def get_minimagen_parser():
     parser.set_defaults(TESTING=False)
     return parser
 
+class PokemonDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, *, encoder_name: str, max_length: int,
+                 side_length: int, train: bool = True, img_transform=None):
+        """
+        MinImagen Dataset object
+
+        :param dataset: Dataset object with a similar structure to HuggingFace's Dataset object.
+        :param encoder_name: Name of the T5 encoder to use.
+        :param max_length: Maximum number of words allowed in a given caption.
+        :param side_length: Side length to resize all images to.
+        :param train: Whether train or test dataset
+        :param img_transform: (optional) Transforms to be applied on a sample in addition to default :code:`ToTensor()` and
+            resizing to :code:`side_length` (applied after the defaults)
+        """
+
+        split = "train" if train else "validation"
+
+        self.urls = dataset['image']
+        self.captions = dataset['text']
+
+        if img_transform is None:
+            self.img_transform = Compose([ToTensor(), Resize((side_length, side_length))])
+        else:
+            self.img_transform = Compose([ToTensor(), Resize((side_length, side_length)), img_transform])
+
+        self.encoder_name = encoder_name
+        self.max_length = max_length
+        self.tokenizer = t5_encode_text
+
+    def __len__(self):
+        return len(self.urls)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        img = self.urls[idx]
+        if img is None:
+            return None
+        elif self.img_transform:
+            img = self.img_transform(img)
+
+        # Have to check None again because `Resize` transform can return None
+        if img is None:
+            return None
+        elif img.shape[0] != 3:
+            return None
+
+        
+        # encodings = self.tokenizer(self.captions[idx], return_tensors='pt', padding='max_length', max_length=self.max_length, truncation=True)
+        enc, msk = t5_encode_text([self.captions[idx]], self.encoder_name, self.max_length)
+        return {'image': img, 'encoding': enc, 'mask': msk}
+
+        # return {'image': img, 'encoding': encodings.input_ids, 'mask': encodings.attention_mask}
 
 class MinimagenDataset(torch.utils.data.Dataset):
     def __init__(self, hf_dataset, *, encoder_name: str, max_length: int,
@@ -267,7 +333,60 @@ class MinimagenDataset(torch.utils.data.Dataset):
         enc, msk = t5_encode_text([self.captions[idx]], self.encoder_name, self.max_length)
 
         return {'image': img, 'encoding': enc, 'mask': msk}
+def Pokemon(args, dataset_name, smalldata=False, testset=False):
+    """
+    Load a custom dataset from Hugging Face datasets library.
 
+    :param args: Arguments Namespace/dictionary parsed from :func:`~.minimagen.training.get_minimagen_parser`
+    :param dataset_name: The name of the dataset to load from the Hugging Face datasets library.
+    :param smalldata: Whether to return a small subset of the data (for testing code)
+    :param testset: Whether to return the testing set (vs training/valid)
+    :return: test_dataset if :code:`testset` else (train_dataset, valid_dataset)
+    """
+    # dset = load_dataset(dataset_name, cache_dir='.').train_test_split(test_size=0.2)
+    # dset = load_dataset(dataset_name, cache_dir='.').train_test_split(test_size=0.2)
+    # print(f"smaldata: {smalldata} testset: {testset}")
+    dataset = load_dataset(dataset_name, cache_dir='.')
+    train_test = dataset['train'].train_test_split(test_size=0.2)
+    dset = DatasetDict({'train': train_test['train'], 'test': train_test['test']})
+   
+    
+    
+    
+    to_tensor = transforms.Compose([
+        transforms.Resize(args.IMG_SIDE_LEN),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+    ])
+    
+    def preprocess(data):
+        for i in range(len(data['image'])):
+            data['image'][i] = to_tensor(data['image'][i])
+        return data
+
+    train_dataset = dset['train']
+    valid_dataset = dset['test']
+    
+    if testset:
+        # Torch test dataset
+        test_dataset = PokemonDataset(valid_dataset, max_length=args.MAX_NUM_WORDS, train=False, encoder_name=args.T5_NAME,
+                                        side_length=args.IMG_SIDE_LEN)
+        return test_dataset
+    else:
+        # Torch train/valid dataset
+        # print(f"Torch train/valid dataset!!!!!!!!")
+        dataset_train_valid = PokemonDataset(train_dataset, max_length=args.MAX_NUM_WORDS, encoder_name=args.T5_NAME,
+                                               train=True,
+                                               side_length=args.IMG_SIDE_LEN)
+
+        # Split into train/valid
+        train_size = int(args.TRAIN_VALID_FRAC * len(dataset_train_valid))
+        valid_size = len(dataset_train_valid) - train_size
+        train_dataset, valid_dataset = torch.utils.data.random_split(dataset_train_valid, [train_size, valid_size])
+        if args.VALID_NUM is not None:
+            valid_dataset.indices = valid_dataset.indices[:args.VALID_NUM + 1]
+        return train_dataset, valid_dataset
 
 def ConceptualCaptions(args, smalldata=False, testset=False):
     """
@@ -315,7 +434,7 @@ def ConceptualCaptions(args, smalldata=False, testset=False):
 
 def get_minimagen_dl_opts(device):
     """Returns dictionary of default MinImagen dataloader options"""
-    return {'batch_size': 4,
+    return {'batch_size': 8,
             'shuffle': True,
             'num_workers': 0,
             'drop_last': True,
@@ -359,25 +478,50 @@ def MinimagenTrain(timestamp, args, unets, imagen, train_dataloader, valid_datal
     :return:
     """
     def train():
+        # print(f"Training ************")
         images = batch['image']
         encoding = batch['encoding']
         mask = batch['mask']
+        scaler = GradScaler()
 
         losses = [0. for i in range(len(unets))]
-        for unet_idx in range(len(unets)):
-            loss = imagen(images, text_embeds=encoding, text_masks=mask, unet_number=unet_idx + 1)
-            losses[unet_idx] = loss.detach()
-            running_train_loss[unet_idx] += loss.detach()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(imagen.parameters(), 50)
+        if not args.mix_precision:
+            for unet_idx in range(len(unets)):
+                loss = imagen(images, text_embeds=encoding, text_masks=mask, unet_number=unet_idx + 1)
+                
+                losses[unet_idx] = loss.detach()
+                running_train_loss[unet_idx] += loss.detach()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(imagen.parameters(), 50)
+        else:
+            print(f"Using mixed precision")
+            for unet_idx in range(len(unets)):
+                with autocast():  # Add autocast context manager
+                    loss = imagen(images, text_embeds=encoding, text_masks=mask, unet_number=unet_idx + 1)
+                losses[unet_idx] = loss.detach()
+                running_train_loss[unet_idx] += loss.detach()
+                scaler.scale(loss).backward()  # Use GradScaler to scale the loss and backpropagate
+                torch.nn.utils.clip_grad_norm_(imagen.parameters(), 50)
+        if args.ACCUM_ITER == 1 or (batch_num % args.ACCUM_ITER == 0) or (batch_num + 1 == len(train_dataloader)):
+            if args.mix_precision:
+                print(f"Using mixed precision")
+
+                scaler.step(optimizer)  # Use GradScaler to update the optimizer
+                scaler.update()  # Update the GradScaler
+                optimizer.zero_grad()
+            else:
+                optimizer.step()
+                optimizer.zero_grad()
+
 
         # Gradient accumulation optimizer step (first bool for logical short-circuiting)
-        if args.ACCUM_ITER == 1 or (batch_num % args.ACCUM_ITER == 0) or (batch_num + 1 == len(train_dataloader)):
-            optimizer.step()
-            optimizer.zero_grad()
+        # if args.ACCUM_ITER == 1 or (batch_num % args.ACCUM_ITER == 0) or (batch_num + 1 == len(train_dataloader)):
+        #     optimizer.step()
+        #     optimizer.zero_grad()
 
         # Every 10% of the way through epoch, save states in case of training failure
-        if batch_num % args.CHCKPT_NUM == 0:
+        # print(f"epoch: {epoch}, args.CHCKPT_NUM: {args.CHCKPT_NUM}")
+        if epoch % 10 == 0 and batch_num == 0:
             with training_dir():
                 with open('training_progess.txt', 'a') as f:
                     f.write(f'{"-" * 10}Checkpoint created at batch number {batch_num}{"-" * 10}\n')
@@ -396,7 +540,7 @@ def MinimagenTrain(timestamp, args, unets, imagen, train_dataloader, valid_datal
                             f'{[round(i.item(), 3) for i in avg_loss]}\n')
                     f.write(f'U-Nets Batch Train Losses Epoch {epoch + 1} Batch {batch_num}: '
                             f'{[round(i.item(), 3) for i in losses]}\n')
-
+            
             # Compute average loss across validation batches for each unet
             running_valid_loss = [0. for i in range(len(unets))]
             imagen.train(False)
@@ -414,13 +558,17 @@ def MinimagenTrain(timestamp, args, unets, imagen, train_dataloader, valid_datal
                     running_valid_loss[unet_idx] += imagen(images, text_embeds=encoding,
                                                            text_masks=mask,
                                                            unet_number=unet_idx + 1).detach()
-
+      
             # Write average validation loss
             avg_loss = [i / len(valid_dataloader) for i in running_valid_loss]
 
             # If validation loss less than previous best, save the model weights
             for i, l in enumerate(avg_loss):
                 print(f"Unet {i} avg validation loss: ", l)
+                # wandb.log({"U-Nets Avg Valid Losses": {l.item()}})
+                # print(f" l: {l}")
+                wandb.log({f'Valid Losses {i} model': round(l.item(), 3)} )
+                print(f"wandb not logged")
                 if l < best_loss[i]:
                     best_loss[i] = l
                     with training_dir("state_dicts"):
@@ -433,8 +581,11 @@ def MinimagenTrain(timestamp, args, unets, imagen, train_dataloader, valid_datal
                         f'U-Nets Avg Valid Losses: {[round(i.item(), 3) for i in avg_loss]}\n')
                     f.write(
                         f'U-Nets Best Valid Losses: {[round(i.item(), 3) for i in best_loss]}\n\n')
-
+                
+    
+    
     best_loss = [torch.tensor(9999999) for i in range(len(unets))]
+    wandb.init(project="Minimagen", config=args)
     for epoch in range(args.EPOCHS):
         print(f'\n{"-" * 20} EPOCH {epoch + 1} {"-" * 20}')
         with training_dir():
@@ -446,36 +597,166 @@ def MinimagenTrain(timestamp, args, unets, imagen, train_dataloader, valid_datal
         running_train_loss = [0. for i in range(len(unets))]
         print(f'\n{"-" * 10}Training...{"-" * 10}')
         for batch_num, batch in tqdm(enumerate(train_dataloader)):
-            try:
-                with _Timeout(timeout):
-                    # If batch is empty, move on to the next one
-                    if not batch:
-                        continue
+            train()
+            # try:
+            #     with _Timeout(timeout):
+            #         # If batch is empty, move on to the next one
+            #         if not batch:
+            #             continue
 
-                    train()
-            except AttributeError:
-                # If batch is empty, move on to the next one
-                if not batch:
-                    continue
+            #         train()
+            # except AttributeError:
+            #     # If batch is empty, move on to the next one
+            #     if not batch:
+            #         continue
 
-                train()
-            # If batch takes longer than `timeout`, go onto the next
-            except _Timeout._Timeout:
-                pass
+            #     train()
+            # # If batch takes longer than `timeout`, go onto the next
+            # except _Timeout._Timeout:
+            #     print(f"Time out at batch {batch_num}")
+            #     pass
             # If the training is interrupted early, save the latest state dicts
-            except Exception as e:
-                # Note that training aborted
-                with training_dir():
-                    with open('training_progess.txt', 'a') as f:
-                        f.write(
-                            f'\n\nTRAINING ABORTED AT EPOCH {epoch}, BATCH NUMBER {batch_num} with exception {e}. MOST RECENT STATE '
-                            f'DICTS SAVED TO ./tmp IN TRAINING FOLDER')
+            # except Exception as e:
+            #     # Note that training aborted
+            #     with training_dir():
+            #         with open('training_progess.txt', 'a') as f:
+            #             f.write(
+            #                 f'\n\nTRAINING ABORTED AT EPOCH {epoch}, BATCH NUMBER {batch_num} with exception {e}. MOST RECENT STATE '
+            #                 f'DICTS SAVED TO ./tmp IN TRAINING FOLDER')
 
-                # Save temporary state dicts
-                with training_dir("tmp"):
-                    for idx in range(len(unets)):
-                        model_path = f"unet_{idx}_tmp.pth"
-                        torch.save(imagen.unets[idx].state_dict(), model_path)
+            #     # Save temporary state dicts
+            #     with training_dir("tmp"):
+            #         for idx in range(len(unets)):
+            #             model_path = f"unet_{idx}_tmp.pth"
+            #             torch.save(imagen.unets[idx].state_dict(), model_path)
+        if epoch % args.CHCKPT_NUM == 0 and epoch != 0:
+            # captions = ["a blue and red pokemon" ,"a dog with big eyes" ,"a drawing of a green pokemon with red eyes" , "a green and yellow toy with a red nose"]
+            captions = ['a blue and red pokemon']
+            folder_name = f"training_{timestamp}"
+            minimagen = load_minimagen(folder_name)
+            images = sample_and_save(captions, training_directory=folder_name, sample_args={'cond_scale':3.})
+            for img in images:
+                wandb_save(img, 'Image', iter_num=f"{epoch}")
+        
+            # wandb.log({"images": [wandb.Image(i) for i in images]})
+    # def train():
+    #     images = batch['image']
+    #     encoding = batch['encoding']
+    #     mask = batch['mask']
+
+    #     losses = [0. for i in range(len(unets))]
+    #     for unet_idx in range(len(unets)):
+    #         loss = imagen(images, text_embeds=encoding, text_masks=mask, unet_number=unet_idx + 1)
+    #         losses[unet_idx] = loss.detach()
+    #         running_train_loss[unet_idx] += loss.detach()
+    #         loss.backward()
+    #         torch.nn.utils.clip_grad_norm_(imagen.parameters(), 50)
+
+    #     # Gradient accumulation optimizer step (first bool for logical short-circuiting)
+    #     if args.ACCUM_ITER == 1 or (batch_num % args.ACCUM_ITER == 0) or (batch_num + 1 == len(train_dataloader)):
+    #         optimizer.step()
+    #         optimizer.zero_grad()
+
+    #     # Every 10% of the way through epoch, save states in case of training failure
+    #     if batch_num % args.CHCKPT_NUM == 0:
+    #         with training_dir():
+    #             with open('training_progess.txt', 'a') as f:
+    #                 f.write(f'{"-" * 10}Checkpoint created at batch number {batch_num}{"-" * 10}\n')
+
+    #         # Save temporary state dicts
+    #         with training_dir("tmp"):
+    #             for idx in range(len(unets)):
+    #                 model_path = f"unet_{idx}_tmp.pth"
+    #                 torch.save(imagen.unets[idx].state_dict(), model_path)
+
+    #         # Write and batch average training loss so far
+    #         avg_loss = [i / batch_num for i in running_train_loss]
+    #         with training_dir():
+    #             with open('training_progess.txt', 'a') as f:
+    #                 f.write(f'U-Nets Avg Train Losses Epoch {epoch + 1} Batch {batch_num}: '
+    #                         f'{[round(i.item(), 3) for i in avg_loss]}\n')
+    #                 f.write(f'U-Nets Batch Train Losses Epoch {epoch + 1} Batch {batch_num}: '
+    #                         f'{[round(i.item(), 3) for i in losses]}\n')
+
+    #         # Compute average loss across validation batches for each unet
+    #         running_valid_loss = [0. for i in range(len(unets))]
+    #         imagen.train(False)
+
+    #         print(f'\n{"-" * 10}Validation...{"-" * 10}')
+    #         for vbatch in tqdm(valid_dataloader):
+    #             if not vbatch:
+    #                 continue
+
+    #             images = vbatch['image']
+    #             encoding = vbatch['encoding']
+    #             mask = vbatch['mask']
+
+    #             for unet_idx in range(len(unets)):
+    #                 running_valid_loss[unet_idx] += imagen(images, text_embeds=encoding,
+    #                                                        text_masks=mask,
+    #                                                        unet_number=unet_idx + 1).detach()
+
+    #         # Write average validation loss
+    #         avg_loss = [i / len(valid_dataloader) for i in running_valid_loss]
+
+    #         # If validation loss less than previous best, save the model weights
+    #         for i, l in enumerate(avg_loss):
+    #             print(f"Unet {i} avg validation loss: ", l)
+    #             if l < best_loss[i]:
+    #                 best_loss[i] = l
+    #                 with training_dir("state_dicts"):
+    #                     model_path = f"unet_{i}_state_{timestamp}.pth"
+    #                     torch.save(imagen.unets[i].state_dict(), model_path)
+
+    #         with training_dir():
+    #             with open('training_progess.txt', 'a') as f:
+    #                 f.write(
+    #                     f'U-Nets Avg Valid Losses: {[round(i.item(), 3) for i in avg_loss]}\n')
+    #                 f.write(
+    #                     f'U-Nets Best Valid Losses: {[round(i.item(), 3) for i in best_loss]}\n\n')
+
+    # best_loss = [torch.tensor(9999999) for i in range(len(unets))]
+    # for epoch in range(args.EPOCHS):
+    #     print(f'\n{"-" * 20} EPOCH {epoch + 1} {"-" * 20}')
+    #     with training_dir():
+    #         with open('training_progess.txt', 'a') as f:
+    #             f.write(f'{"-" * 20} EPOCH {epoch + 1} {"-" * 20}\n')
+
+    #     imagen.train(True)
+
+    #     running_train_loss = [0. for i in range(len(unets))]
+    #     print(f'\n{"-" * 10}Training...{"-" * 10}')
+    #     for batch_num, batch in tqdm(enumerate(train_dataloader)):
+    #         try:
+    #             with _Timeout(timeout):
+    #                 # If batch is empty, move on to the next one
+    #                 if not batch:
+    #                     continue
+
+    #                 train()
+    #         except AttributeError:
+    #             # If batch is empty, move on to the next one
+    #             if not batch:
+    #                 continue
+
+    #             train()
+    #         # If batch takes longer than `timeout`, go onto the next
+    #         except _Timeout._Timeout:
+    #             pass
+    #         # If the training is interrupted early, save the latest state dicts
+    #         except Exception as e:
+    #             # Note that training aborted
+    #             with training_dir():
+    #                 with open('training_progess.txt', 'a') as f:
+    #                     f.write(
+    #                         f'\n\nTRAINING ABORTED AT EPOCH {epoch}, BATCH NUMBER {batch_num} with exception {e}. MOST RECENT STATE '
+    #                         f'DICTS SAVED TO ./tmp IN TRAINING FOLDER')
+
+    #             # Save temporary state dicts
+    #             with training_dir("tmp"):
+    #                 for idx in range(len(unets)):
+    #                     model_path = f"unet_{idx}_tmp.pth"
+    #                     torch.save(imagen.unets[idx].state_dict(), model_path)
 
 
 def load_restart_training_parameters(args, justparams=False):
